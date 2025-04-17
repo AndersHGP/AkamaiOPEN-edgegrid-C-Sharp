@@ -1,42 +1,16 @@
-﻿// Copyright 2014 Akamai Technologies http://developer.akamai.com.
-//
-// Licensed under the Apache License, KitVersion 2.0 (the "License");
-// you may not use this file except in compliance with the License.
-// You may obtain a copy of the License at
-//
-//     http://www.apache.org/licenses/LICENSE-2.0
-//
-// Unless required by applicable law or agreed to in writing, software
-// distributed under the License is distributed on an "AS IS" BASIS,
-// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-// See the License for the specific language governing permissions and
-// limitations under the License.
-//
-// Author: colinb@akamai.com  (Colin Bendell)
-//
-
-using Akamai.EdgeGrid.Auth;
-using Akamai.Utils;
+﻿using Akamai.EdgeGrid.Auth;
 using System;
 using System.Collections.Generic;
 using System.IO;
-using System.Linq;
-using System.Net;
+using System.Net.Http;
 using System.Text;
 using System.Threading.Tasks;
 
 namespace Akamai.EdgeGrid
 {
-    /// <summary>
-    /// Command Line sample application to demonstrate the utilization of the {Open} APIs. 
-    /// This can be used for both command line invocation or reference on how to leverage the 
-    /// Api. All supported commands are implemented in this sample for convience.
-    /// 
-    /// Author: colinb@akamai.com  (Colin Bendell)
-    /// </summary>
     class OpenAPI
     {
-        static void Main(string[] args)
+        static async Task Main(string[] args)
         {
             string secret = null;
             string clientToken = null;
@@ -46,14 +20,13 @@ namespace Akamai.EdgeGrid
             string httpMethod = "GET";
             string contentType = "application/json";
 
-
             string outputfile = null;
             string uploadfile = null;
             string data = null;
             int maxBodySize = 2048;
 
             bool verbose = false;
-           
+
             string firstarg = null;
             foreach (string arg in args)
             {
@@ -93,7 +66,6 @@ namespace Akamai.EdgeGrid
                         case "-X":
                             httpMethod = arg;
                             break;
-
                     }
                     firstarg = null;
                 }
@@ -103,7 +75,7 @@ namespace Akamai.EdgeGrid
                     return;
                 }
                 else if (arg == "-v" || arg == "-vv")
-                    verbose = true;           
+                    verbose = true;
                 else if (!arg.StartsWith("-"))
                     apiurl = arg;
                 else
@@ -124,17 +96,17 @@ namespace Akamai.EdgeGrid
                 Console.WriteLine("Content-Type: {0}", contentType);
             }
 
-            execute(httpMethod, apiurl, headers, clientToken, accessToken, secret, data, uploadfile, outputfile, maxBodySize, contentType, verbose);
+            await execute(httpMethod, apiurl, headers, clientToken, accessToken, secret, data, uploadfile, outputfile, maxBodySize, contentType, verbose);
         }
 
-        static void execute(string httpMethod, string apiurl, List<string> headers, string clientToken, string accessToken, string secret, string data, string uploadfile, string outputfile, int? maxBodySize, string contentType, bool verbose = false)
+        static async Task execute(string httpMethod, string apiurl, List<string> headers, string clientToken, string accessToken, string secret, string data, string uploadfile, string outputfile, int? maxBodySize, string contentType, bool verbose = false)
         {
             if (apiurl == null || clientToken == null || accessToken == null || secret == null)
             {
                 help();
                 return;
             }
-            
+
             EdgeGridV1Signer signer = new EdgeGridV1Signer(null, maxBodySize);
             ClientCredential credential = new ClientCredential(clientToken, accessToken, secret);
 
@@ -142,44 +114,47 @@ namespace Akamai.EdgeGrid
             if (uploadfile != null)
                 uploadStream = new FileInfo(uploadfile).OpenRead();
             else if (data != null)
-                uploadStream = new MemoryStream(data.ToByteArray());
+                uploadStream = new MemoryStream(Encoding.UTF8.GetBytes(data.Trim('\'')));
 
-            var uri = new Uri(apiurl);
-            var request = WebRequest.Create(uri);
-            
-            foreach (string header in headers) request.Headers.Add(header);
-            request.Method = httpMethod;
+            var request = new HttpRequestMessage(new HttpMethod(httpMethod), apiurl);
 
-            Stream output = Console.OpenStandardOutput();
-            if (outputfile != null)
-                output = new FileInfo(outputfile).OpenWrite();
+            foreach (string header in headers)
+            {
+                var headerParts = header.Split(new[] { ':' }, 2);
+                if (headerParts.Length == 2)
+                {
+                    request.Headers.Add(headerParts[0].Trim(), headerParts[1].Trim());
+                }
+            }
+
+            if (uploadStream != null)
+            {
+                request.Content = new StreamContent(uploadStream);
+                request.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue(contentType);
+            }
 
             if (verbose)
             {
                 signer.Sign(request, credential, uploadStream);
-                Console.WriteLine("Authorization: {0}", request.Headers.Get("Authorization"));
+                Console.WriteLine("Authorization: {0}", request.Headers.Authorization);
                 Console.WriteLine();
             }
-              
-            using (var result = signer.Execute(request, credential, uploadStream))
+
+            using (var client = new HttpClient())
             {
+                signer.Sign(request, credential, uploadStream);
+                var response = await client.SendAsync(request);
+
+                Stream output = Console.OpenStandardOutput();
+                if (outputfile != null)
+                    output = new FileInfo(outputfile).OpenWrite();
+
                 using (output)
                 {
-                    using (result)
-                    {
-                        byte[] buffer = new byte[1024*1024];
-                        int bytesRead = 0;
-
-                        while ((bytesRead = result.Read(buffer, 0, buffer.Length)) != 0)
-                        {
-                            output.Write(buffer, 0, bytesRead);
-                        }
-                    }
+                    var responseStream = await response.Content.ReadAsStreamAsync();
+                    await responseStream.CopyToAsync(output);
                 }
             }
-        
-
-
         }
 
         static void help()
@@ -200,9 +175,9 @@ Where:
     -f srcfile      local file used as source when action=upload
     -m max-size     maximum amount of data to use in the signing hash. Default is 2048
     -H header-line  Http Header 'Name: value'
-    -X method       force HTTP PUT,POST,DELETE 
+    -X method       force HTTP PUT,POST,DELETE
     -T content-type the HTTP content type (default = application/json)
-    url             fully qualified api url such as https://akab-1234.luna.akamaiapis.net/diagnostic-tools/v1/locations       
+    url             fully qualified api url such as https://akab-1234.luna.akamaiapis.net/diagnostic-tools/v1/locations
 
 ");
         }
