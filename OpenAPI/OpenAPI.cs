@@ -114,7 +114,7 @@ namespace Akamai.EdgeGrid
             if (uploadfile != null)
                 uploadStream = new FileInfo(uploadfile).OpenRead();
             else if (data != null)
-                uploadStream = new MemoryStream(Encoding.UTF8.GetBytes(data.Trim('\'')));
+                uploadStream = new MemoryStream(Encoding.UTF8.GetBytes(data.Trim('\''))); //TODO: remove this trim
 
             var request = new HttpRequestMessage(new HttpMethod(httpMethod), apiurl);
 
