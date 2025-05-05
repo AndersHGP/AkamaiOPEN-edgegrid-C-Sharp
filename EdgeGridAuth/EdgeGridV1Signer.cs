@@ -1,6 +1,5 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.Collections.Specialized;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
@@ -11,116 +10,163 @@ using Akamai.Utils;
 
 namespace Akamai.EdgeGrid.Auth
 {
+    /// <summary>
+    /// Handles signing HTTP requests using the EdgeGrid V1 authentication scheme.
+    /// </summary>
     public class EdgeGridV1Signer : IRequestSigner
     {
+        private readonly IHttpClientFactory _httpClientFactory;
+
         public const string AuthorizationHeader = "Authorization";
 
-        internal IList<string> HeadersToInclude { get; private set; }
-        internal long? MaxBodyHashSize { get; private set; }
+        public IReadOnlyList<string> HeadersToInclude { get; }
+        public long? MaxBodyHashSize { get; }
 
-        public EdgeGridV1Signer(IList<string> headers = null, long? maxBodyHashSize = 2048)
+        /// <summary>
+        /// Initializes a new instance of the EdgeGridV1Signer class.
+        /// </summary>
+        /// <param name="httpClientFactory">Factory for creating HttpClient instances.</param>
+        /// <param name="headers">Headers to include in the signature.</param>
+        /// <param name="maxBodyHashSize">Maximum size of the request body to hash.</param>
+        public EdgeGridV1Signer(IHttpClientFactory httpClientFactory, IEnumerable<string>? headers = null, long? maxBodyHashSize = 2048)
         {
-            this.HeadersToInclude = headers ?? new List<string>();
-            this.MaxBodyHashSize = maxBodyHashSize;
+            _httpClientFactory = httpClientFactory ?? throw new ArgumentNullException(nameof(httpClientFactory));
+            HeadersToInclude = headers?.ToList() ?? new List<string>();
+            MaxBodyHashSize = maxBodyHashSize;
         }
 
-        internal string GetAuthDataValue(ClientCredential credential, DateTime timestamp)
+        /// <summary>
+        /// Generates the authentication data string for the request.
+        /// </summary>
+        /// <param name="credential">Client credentials for signing.</param>
+        /// <param name="timestamp">Timestamp for the request.</param>
+        /// <returns>Authentication data string.</returns>
+        private string GetAuthDataValue(ClientCredential credential, DateTime timestamp)
         {
-            Guid nonce = Guid.NewGuid();
-            return string.Format("EG1-HMAC-SHA256 client_token={0};access_token={1};timestamp={2};nonce={3};",
-                credential.ClientToken,
-                credential.AccessToken,
-                timestamp.ToString("yyyyMMddTHH:mm:ssZ"),
-                nonce.ToString().ToLower());
+            var nonce = Guid.NewGuid();
+            return $"EG1-HMAC-SHA256 client_token={credential.ClientToken};access_token={credential.AccessToken};timestamp={timestamp:yyyyMMddTHH:mm:ssZ};nonce={nonce:N};";
         }
 
-        internal string GetRequestData(HttpRequestMessage request, Stream requestStream = null)
+        /// <summary>
+        /// Constructs the request data string to be signed.
+        /// </summary>
+        /// <param name="request">The HTTP request message.</param>
+        /// <param name="requestStream">Optional request body stream.</param>
+        /// <returns>Request data string.</returns>
+        private string GetRequestData(HttpRequestMessage request, Stream? requestStream = null)
         {
-            string method = request.Method.Method;
-            string headers = GetRequestHeaders(request.Headers);
-            string bodyHash = method == "POST" ? GetRequestStreamHash(requestStream) : "";
+            var method = request.Method.Method.ToUpperInvariant();
+            var headers = GetRequestHeaders(request.Headers);
+            var bodyHash = method == "POST" ? GetRequestStreamHash(requestStream) : string.Empty;
 
-            return string.Format("{0}\t{1}\t{2}\t{3}\t{4}\t{5}\t",
-                method.ToUpper(),
-                request.RequestUri.Scheme,
-                request.RequestUri.Host,
-                request.RequestUri.PathAndQuery,
-                headers,
-                bodyHash);
+            return $"{method}\t{request.RequestUri!.Scheme}\t{request.RequestUri.Host}\t{request.RequestUri.PathAndQuery}\t{headers}\t{bodyHash}\t";
         }
 
-        internal string GetRequestHeaders(System.Net.Http.Headers.HttpHeaders headers)
+        /// <summary>
+        /// Retrieves the headers to include in the signature.
+        /// </summary>
+        /// <param name="headers">HTTP headers from the request.</param>
+        /// <returns>Formatted headers string.</returns>
+        private string GetRequestHeaders(System.Net.Http.Headers.HttpHeaders headers)
         {
-            if (headers == null) return string.Empty;
+            if (headers == null || !HeadersToInclude.Any()) return string.Empty;
 
-            StringBuilder headerString = new StringBuilder();
-            foreach (var header in this.HeadersToInclude)
+            var headerString = new StringBuilder();
+            foreach (var header in HeadersToInclude)
             {
                 if (headers.TryGetValues(header, out var values))
                 {
-                    string value = string.Join(" ", values).Trim();
-                    headerString.AppendFormat("{0}:{1}\t", header, Regex.Replace(value, "\\s+", " ", RegexOptions.Compiled));
+                    var value = string.Join(" ", values).Trim();
+                    headerString.Append($"{header}:{Regex.Replace(value, "\\s+", " ", RegexOptions.Compiled)}\t");
                 }
             }
             return headerString.ToString();
         }
 
-        internal string GetRequestStreamHash(Stream requestStream)
+        /// <summary>
+        /// Computes the hash of the request body stream.
+        /// </summary>
+        /// <param name="requestStream">The request body stream.</param>
+        /// <returns>Base64-encoded hash of the stream.</returns>
+        private string GetRequestStreamHash(Stream? requestStream)
         {
             if (requestStream == null) return string.Empty;
 
-            if (!requestStream.CanRead)
-                throw new IOException("Cannot read stream to compute hash");
+            if (!requestStream.CanRead || !requestStream.CanSeek)
+                throw new IOException("Stream must be readable and seekable!");
 
-            if (!requestStream.CanSeek)
-                throw new IOException("Stream must be seekable!");
-
-            string streamHash = requestStream.ComputeHash(ChecksumAlgorithm.SHA256, MaxBodyHashSize).ToBase64();
+            var streamHash = requestStream.ComputeHash(ChecksumAlgorithm.SHA256, MaxBodyHashSize).ToBase64();
             requestStream.Seek(0, SeekOrigin.Begin);
             return streamHash;
         }
 
-        internal string GetAuthorizationHeaderValue(ClientCredential credential, DateTime timestamp, string authData, string requestData)
+        /// <summary>
+        /// Generates the authorization header value.
+        /// </summary>
+        /// <param name="credential">Client credentials for signing.</param>
+        /// <param name="timestamp">Timestamp for the request.</param>
+        /// <param name="authData">Authentication data string.</param>
+        /// <param name="requestData">Request data string.</param>
+        /// <returns>Authorization header value.</returns>
+        private string GetAuthorizationHeaderValue(ClientCredential credential, DateTime timestamp, string authData, string requestData)
         {
-            string signingKey = timestamp.ToString("yyyyMMddTHH:mm:ssZ").ToByteArray().ComputeKeyedHash(credential.Secret, KeyedHashAlgorithm.HMACSHA256).ToBase64();
-            string authSignature = string.Format("{0}{1}", requestData, authData).ToByteArray().ComputeKeyedHash(signingKey, KeyedHashAlgorithm.HMACSHA256).ToBase64();
-            return string.Format("{0}signature={1}", authData, authSignature);
+            var signingKey = timestamp.ToString("yyyyMMddTHH:mm:ssZ").ToByteArray()
+                .ComputeKeyedHash(credential.Secret, KeyedHashAlgorithm.HMACSHA256)
+                .ToBase64();
+
+            var authSignature = $"{requestData}{authData}".ToByteArray()
+                .ComputeKeyedHash(signingKey, KeyedHashAlgorithm.HMACSHA256)
+                .ToBase64();
+
+            return $"{authData}signature={authSignature}";
         }
 
-        public void Sign(HttpRequestMessage request, ClientCredential credential, Stream uploadStream = null)
+        /// <summary>
+        /// Signs the HTTP request by adding the authorization header.
+        /// </summary>
+        /// <param name="request">The HTTP request message.</param>
+        /// <param name="credential">Client credentials for signing.</param>
+        /// <param name="uploadStream">Optional request body stream.</param>
+        public void Sign(HttpRequestMessage request, ClientCredential credential, Stream? uploadStream = null)
         {
-            if (request == null)
-                throw new ArgumentNullException(nameof(request), "Request cannot be null.");
+            ArgumentNullException.ThrowIfNull(request, nameof(request));
+            ArgumentNullException.ThrowIfNull(credential, nameof(credential));
 
-            if (credential == null)
-                throw new ArgumentNullException(nameof(credential), "Credential cannot be null.");
-
-            // Existing logic for signing the request
             var timestamp = DateTime.UtcNow;
             var authData = GetAuthDataValue(credential, timestamp);
             var requestData = GetRequestData(request, uploadStream);
             var authorizationHeader = GetAuthorizationHeaderValue(credential, timestamp, authData, requestData);
 
-            if (!request.Headers.Contains("Authorization"))
+            if (!request.Headers.Contains(AuthorizationHeader))
             {
-                request.Headers.Add("Authorization", authorizationHeader);
+                request.Headers.Add(AuthorizationHeader, authorizationHeader);
             }
         }
 
-        public async Task<HttpResponseMessage> ExecuteAsync(HttpRequestMessage request, ClientCredential credential, Stream uploadStream = null)
+        /// <summary>
+        /// Executes the HTTP request with the signed authorization header.
+        /// </summary>
+        /// <param name="request">The HTTP request message.</param>
+        /// <param name="credential">Client credentials for signing.</param>
+        /// <param name="uploadStream">Optional request body stream.</param>
+        /// <returns>The HTTP response message.</returns>
+        public async Task<HttpResponseMessage> ExecuteAsync(HttpRequestMessage request, ClientCredential credential, Stream? uploadStream = null)
         {
-            using (var client = new HttpClient())
+            ArgumentNullException.ThrowIfNull(request, nameof(request));
+            ArgumentNullException.ThrowIfNull(credential, nameof(credential));
+
+            Sign(request, credential, uploadStream);
+
+            if (uploadStream != null && request.Method == HttpMethod.Post)
             {
-                Sign(request, credential, uploadStream);
-
-                if (uploadStream != null && request.Method == HttpMethod.Post)
+                request.Content = new StreamContent(uploadStream)
                 {
-                    request.Content = new StreamContent(uploadStream);
-                    request.Content.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json");
-                }
-
-                return await client.SendAsync(request);
+                    Headers = { ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/json") }
+                };
             }
+
+            var client = _httpClientFactory.CreateClient();
+            return await client.SendAsync(request).ConfigureAwait(false);
         }
     }
 }

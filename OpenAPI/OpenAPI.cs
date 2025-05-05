@@ -1,4 +1,5 @@
 ﻿using Akamai.EdgeGrid.Auth;
+using Microsoft.Extensions.DependencyInjection;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -96,10 +97,16 @@ namespace Akamai.EdgeGrid
                 Console.WriteLine("Content-Type: {0}", contentType);
             }
 
-            await execute(httpMethod, apiurl, headers, clientToken, accessToken, secret, data, uploadfile, outputfile, maxBodySize, contentType, verbose);
+            // Set up dependency injection for IHttpClientFactory
+            var serviceCollection = new ServiceCollection();
+            serviceCollection.AddHttpClient();
+            var serviceProvider = serviceCollection.BuildServiceProvider();
+            var httpClientFactory = serviceProvider.GetRequiredService<IHttpClientFactory>();
+
+            await execute(httpMethod, apiurl, headers, clientToken, accessToken, secret, data, uploadfile, outputfile, maxBodySize, contentType, verbose, httpClientFactory);
         }
 
-        static async Task execute(string httpMethod, string apiurl, List<string> headers, string clientToken, string accessToken, string secret, string data, string uploadfile, string outputfile, int? maxBodySize, string contentType, bool verbose = false)
+        static async Task execute(string httpMethod, string apiurl, List<string> headers, string clientToken, string accessToken, string secret, string data, string uploadfile, string outputfile, int? maxBodySize, string contentType, bool verbose, IHttpClientFactory httpClientFactory)
         {
             if (apiurl == null || clientToken == null || accessToken == null || secret == null)
             {
@@ -107,14 +114,14 @@ namespace Akamai.EdgeGrid
                 return;
             }
 
-            EdgeGridV1Signer signer = new EdgeGridV1Signer(null, maxBodySize);
+            EdgeGridV1Signer signer = new EdgeGridV1Signer(httpClientFactory, maxBodyHashSize: maxBodySize);
             ClientCredential credential = new ClientCredential(clientToken, accessToken, secret);
 
             Stream uploadStream = null;
             if (uploadfile != null)
                 uploadStream = new FileInfo(uploadfile).OpenRead();
             else if (data != null)
-                uploadStream = new MemoryStream(Encoding.UTF8.GetBytes(data.Trim('\''))); //TODO: remove this trim
+                uploadStream = new MemoryStream(Encoding.UTF8.GetBytes(data.Trim('\'')));
 
             var request = new HttpRequestMessage(new HttpMethod(httpMethod), apiurl);
 
@@ -140,20 +147,18 @@ namespace Akamai.EdgeGrid
                 Console.WriteLine();
             }
 
-            using (var client = new HttpClient())
+            var client = httpClientFactory.CreateClient();
+            signer.Sign(request, credential, uploadStream);
+            var response = await client.SendAsync(request);
+
+            Stream output = Console.OpenStandardOutput();
+            if (outputfile != null)
+                output = new FileInfo(outputfile).OpenWrite();
+
+            using (output)
             {
-                signer.Sign(request, credential, uploadStream);
-                var response = await client.SendAsync(request);
-
-                Stream output = Console.OpenStandardOutput();
-                if (outputfile != null)
-                    output = new FileInfo(outputfile).OpenWrite();
-
-                using (output)
-                {
-                    var responseStream = await response.Content.ReadAsStreamAsync();
-                    await responseStream.CopyToAsync(output);
-                }
+                var responseStream = await response.Content.ReadAsStreamAsync();
+                await responseStream.CopyToAsync(output);
             }
         }
 
